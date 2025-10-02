@@ -6,3 +6,6 @@ repository = "https://github.com/Pogodaanton/shush"
 license = "MIT"
 
 [dependencies]
+iced = "0.13.1"
+librespot = "0.7.1"
+log = "0.4.28"
