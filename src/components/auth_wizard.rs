@@ -1,4 +1,5 @@
-use librespot::oauth::OAuthClientBuilder;
+use librespot::core::token::Token;
+use librespot::oauth::{OAuthClientBuilder, OAuthToken};
 use crate::error::Error;
 use crate::util::{ACCESS_SCOPES, CLIENT_ID, SPOTIFY_REDIRECT_URI};
 
@@ -8,6 +9,8 @@ pub struct AuthWizard {
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenLoginInBrowser,
+    OAuthSuccessful(OAuthToken),
+    OAuthFailure,
 }
 
 pub enum Action {
@@ -30,7 +33,12 @@ impl AuthWizard {
 
     pub fn update(&mut self, message: Message) -> Action {
         match message {
-            Message::OpenLoginInBrowser => Action::Run(self.handle_errors(self.setup_spotify_auth()))
+            Message::OpenLoginInBrowser => Action::Run(self.setup_spotify_auth()),
+            Message::OAuthSuccessful(token) => {
+                println!("OAuth Token: {token:#?}");
+                Action::None
+            },
+            Message::OAuthFailure => Action::None,
         }
     }
 }
@@ -44,27 +52,31 @@ impl AuthWizard {
         })
     }
 
-    fn setup_spotify_auth(&self, ) -> Result<iced::Task<Message>, Error> {
-        let scopes = ACCESS_SCOPES.split(",").map(|s| s.trim()).collect::<Vec<_>>();
-        let client = OAuthClientBuilder::new(CLIENT_ID, SPOTIFY_REDIRECT_URI, scopes)
-            .open_in_browser()
-            .build()?;
+    fn setup_spotify_auth(&self) -> iced::Task<Message> {
+        iced::Task::future(async {
+            let scopes = ACCESS_SCOPES.split(",").map(|s| s.trim()).collect::<Vec<_>>();
+            let client = match OAuthClientBuilder::new(CLIENT_ID, SPOTIFY_REDIRECT_URI, scopes)
+                .open_in_browser()
+                .build()
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    log::error!("Error establishing OAuthClient: {}", err);
+                    return Message::OAuthFailure;
+                }
+            };
 
-        let refresh_token = match client.get_access_token() {
-            Ok(token) => {
-                println!("OAuth Token: {token:#?}");
-                token.refresh_token
-            }
-            Err(err) => {
-                return Err(Error::from(err).situation("Unable to get OAuth Token"));
-            }
-        };
+            let access_token = match client.get_access_token_async().await {
+                Ok(token) => {
+                    token
+                }
+                Err(err) => {
+                    log::error!("Unable to get OAuthToken: {}", err);
+                    return Message::OAuthFailure;
+                }
+            };
 
-        match client.refresh_token(&refresh_token) {
-            Ok(token) => println!("New refreshed OAuth Token: {token:#?}"),
-            Err(err) => return Err(Error::from(err).situation("Unable to get refreshed OAuth Token")),
-        }
-
-        Ok(iced::Task::none())
+            Message::OAuthSuccessful(access_token)
+        })
     }
 }
