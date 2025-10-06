@@ -3,6 +3,8 @@ use librespot::oauth::{OAuthClientBuilder, OAuthToken};
 use crate::error::Error;
 use crate::util::{ACCESS_SCOPES, CLIENT_ID, SPOTIFY_REDIRECT_URI};
 
+
+#[derive(Debug, Clone)]
 pub struct AuthWizard {
 }
 
@@ -14,7 +16,10 @@ pub enum Message {
 }
 
 pub enum Action {
+    /// Execute task and propagate message to AuthWizard
     Run(iced::Task<Message>),
+    /// Start session with given OAuthToken
+    AuthenticateWithToken(OAuthToken),
     None
 }
 
@@ -35,8 +40,8 @@ impl AuthWizard {
         match message {
             Message::OpenLoginInBrowser => Action::Run(self.setup_spotify_auth()),
             Message::OAuthSuccessful(token) => {
-                println!("OAuth Token: {token:#?}");
-                Action::None
+                log::debug!("OAuth Token: {token:#?}");
+                Action::AuthenticateWithToken(token)
             },
             Message::OAuthFailure => Action::None,
         }

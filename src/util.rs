@@ -1,3 +1,5 @@
+use crate::error::Error;
+
 /// Client ID for desktop keymaster client
 pub const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 
@@ -6,3 +8,6 @@ pub const ACCESS_SCOPES: &str = "streaming,user-read-email,user-read-private,pla
 
 
 pub const SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
+
+/// Logging threshold environment variable
+pub const LOG_ENV_NAME: &str = "SHUSH_LOG";

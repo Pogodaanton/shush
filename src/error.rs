@@ -1,4 +1,5 @@
 use std::fmt::Formatter;
+use std::io;
 use librespot::oauth::OAuthError;
 
 #[derive(Debug)]
@@ -10,7 +11,10 @@ pub struct Error {
 
 #[derive(Debug)]
 pub enum ErrorKind {
-    Unexpected
+    Unexpected,
+    IOError,
+    InvalidData,
+    LibrespotError,
 }
 
 impl Error {
@@ -29,6 +33,20 @@ impl Error {
     pub fn situation(mut self, situation: impl Into<String>) -> Self {
         self.situation = Some(situation.into());
         self
+    }
+
+    pub fn io_error<E>(error: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>
+    {
+        Self::new(ErrorKind::IOError, error)
+    }
+
+    pub fn invalid_data<S>(message: S) -> Self
+    where
+        S: Into<Box<dyn std::error::Error + Send + Sync>>
+    {
+        Self::new(ErrorKind::InvalidData, message)
     }
 }
 
@@ -53,6 +71,9 @@ impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ErrorKind::Unexpected => write!(f, "Unexpected error"),
+            ErrorKind::IOError => write!(f, "I/O error"),
+            ErrorKind::InvalidData => write!(f, "Invalid data"),
+            ErrorKind::LibrespotError => write!(f, "Librespot internal error"),
         }
     }
 }
@@ -60,5 +81,17 @@ impl std::fmt::Display for ErrorKind {
 impl From<OAuthError> for Error {
     fn from(value: OAuthError) -> Self {
         Self::new(ErrorKind::Unexpected, value).situation("while handling OAuth")
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Self::new(ErrorKind::IOError, value)
+    }
+}
+
+impl From<librespot::core::Error> for Error {
+    fn from(value: librespot::core::Error) -> Self {
+        Self::new(ErrorKind::LibrespotError, value)
     }
 }
