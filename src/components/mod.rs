@@ -1,2 +1,2 @@
 pub mod auth_wizard;
-mod prot_play;
+pub mod prot_play;
