@@ -4682,6 +4682,7 @@ dependencies = [
  "log",
  "serde",
  "tokio",
+ "tokio-stream",
  "toml",
 ]
 

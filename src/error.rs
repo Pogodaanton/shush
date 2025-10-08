@@ -1,6 +1,7 @@
+use librespot::oauth::OAuthError;
 use std::fmt::Formatter;
 use std::io;
-use librespot::oauth::OAuthError;
+use tokio::sync::mpsc::error::SendError;
 
 #[derive(Debug)]
 pub struct Error {
@@ -15,17 +16,18 @@ pub enum ErrorKind {
     IOError,
     InvalidData,
     LibrespotError,
+    ChannelClosed,
 }
 
 impl Error {
     pub fn new<E>(kind: ErrorKind, error: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         Self {
             kind,
             situation: None,
-            details: error.into()
+            details: error.into(),
         }
     }
 
@@ -35,23 +37,27 @@ impl Error {
         self
     }
 
+    #[allow(dead_code)]
     pub fn io_error<E>(error: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         Self::new(ErrorKind::IOError, error)
     }
 
+    #[allow(dead_code)]
     pub fn invalid_data<S>(message: S) -> Self
     where
-        S: Into<Box<dyn std::error::Error + Send + Sync>>
+        S: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         Self::new(ErrorKind::InvalidData, message)
     }
 }
 
 impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { self.details.source() }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.details.source()
+    }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -74,6 +80,7 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::IOError => write!(f, "I/O error"),
             ErrorKind::InvalidData => write!(f, "Invalid data"),
             ErrorKind::LibrespotError => write!(f, "Librespot internal error"),
+            ErrorKind::ChannelClosed => write!(f, "Channel closed"),
         }
     }
 }
@@ -93,5 +100,16 @@ impl From<io::Error> for Error {
 impl From<librespot::core::Error> for Error {
     fn from(value: librespot::core::Error) -> Self {
         Self::new(ErrorKind::LibrespotError, value)
+    }
+}
+
+impl<T> From<SendError<T>> for Error {
+    fn from(_: SendError<T>) -> Self {
+        // We cannot propagate SendError due to template T.
+        // As for now, the error only means one thing anyway, so we can just communicate that manually.
+        Self::new(
+            ErrorKind::ChannelClosed,
+            "Currently read MPSC channel has already been closed",
+        )
     }
 }

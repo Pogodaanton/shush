@@ -1,5 +1,3 @@
-use crate::error::Error;
-
 /// Client ID for desktop keymaster client
 pub const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 

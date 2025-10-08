@@ -1,25 +1,44 @@
-use librespot::core::SpotifyId;
-use crate::compat::{LibrespotPlayer};
 use crate::core::config::Config;
-use crate::error::{Error, ErrorKind};
+use crate::error::Error;
+use librespot::core::SpotifyId;
+use librespot::core::session::Session as LibrespotSession;
 use librespot::discovery::Credentials;
 use librespot::oauth::OAuthToken;
 use librespot::playback::audio_backend;
 use librespot::playback::config::{AudioFormat, PlayerConfig};
 use librespot::playback::mixer::NoOpVolume;
+use librespot::playback::player::{Player, PlayerEvent};
 use librespot::protocol::authentication::AuthenticationType;
-use librespot::core::session::Session as LibrespotSession;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
-#[derive(Default, Debug)]
+pub enum SessionRequest {
+    PlayThatOneTrack,
+    Pause,
+    Resume,
+    Stop,
+}
+
+#[derive(Debug)]
 pub struct Session {
     config: Option<Config>,
-    librespot_player: Option<LibrespotPlayer>,
+    session_request_handler: JoinHandle<()>,
 }
 
 impl Session {
     pub async fn authenticate_with_access_token(
         token: OAuthToken,
-    ) -> Result<Self, Error> {
+    ) -> Result<
+        (
+            Self,
+            UnboundedReceiverStream<PlayerEvent>,
+            UnboundedSender<SessionRequest>,
+        ),
+        Error,
+    > {
         let librespot_session_config = librespot::core::SessionConfig::default();
         let librespot_session =
             librespot::core::session::Session::new(librespot_session_config, None);
@@ -30,13 +49,23 @@ impl Session {
 
         let credentials = Self::get_stored_credentials(&librespot_session);
         let player = Self::get_new_player(librespot_session);
+        let player_event_receiver = player.get_player_event_channel();
+        let player_event_receiver_stream = UnboundedReceiverStream::from(player_event_receiver);
 
-        Ok(Self {
-            config: Config {
-                credentials: Some(credentials),
-            }.into(),
-            librespot_player: Some(player),
-        })
+        let (session_request_sender, rx) = mpsc::unbounded_channel::<SessionRequest>();
+        let session_request_handler = tokio::spawn(Self::handle_session_requests(rx, player));
+
+        Ok((
+            Self {
+                config: Config {
+                    credentials: Some(credentials),
+                }
+                .into(),
+                session_request_handler,
+            },
+            player_event_receiver_stream,
+            session_request_sender,
+        ))
     }
 
     fn get_stored_credentials(session: &LibrespotSession) -> Credentials {
@@ -47,39 +76,38 @@ impl Session {
         }
     }
 
-    pub fn get_new_player(session: LibrespotSession) -> LibrespotPlayer {
+    pub fn get_new_player(session: LibrespotSession) -> Arc<Player> {
         let player_config = PlayerConfig::default();
         let audio_format = AudioFormat::default();
         let backend = audio_backend::find(None).unwrap();
 
-        let player = librespot::playback::player::Player::new(
-            player_config,
-            session,
-            Box::new(NoOpVolume),
-            move || backend(None, audio_format),
-        );
-
-        player.into()
+        Player::new(player_config, session, Box::new(NoOpVolume), move || {
+            backend(None, audio_format)
+        })
     }
 
-    pub async fn play_that_one_song(&mut self) -> Result<(), Error> {
-        let mut player = match self.librespot_player.as_mut() {
-            None => {
-                return Err(Error::new(ErrorKind::Unexpected, "Cannot find librespot player instance."));
-            },
-            Some(mut player) => player
-        }.get();
-        let track = SpotifyId::from_uri("spotify:track:21Plp9v154VpwD9uttU4NS")?;
+    async fn handle_session_requests(
+        mut rx: UnboundedReceiver<SessionRequest>,
+        player: Arc<Player>,
+    ) {
+        while let Some(req) = rx.recv().await {
+            match req {
+                SessionRequest::PlayThatOneTrack => {
+                    Self::async_play_that_one_song(&player).await.unwrap()
+                }
+                SessionRequest::Pause => player.pause(),
+                SessionRequest::Resume => player.play(),
+                SessionRequest::Stop => player.stop(),
+            }
+        }
+    }
+
+    async fn async_play_that_one_song(player: &Player) -> Result<(), Error> {
+        let track = SpotifyId::from_uri("spotify:track:2dQNBDqHumZS3tfzjrfUHi")?;
 
         player.load(track, true, 0);
 
-        player.play();
-
         log::info!("Playing...");
-
-        player.await_end_of_track().await;
-
-        log::info!("Done");
 
         Ok(())
     }

@@ -5,22 +5,28 @@ mod error;
 mod util;
 
 use crate::components::{auth_wizard, prot_play};
-use crate::core::session::Session;
-use crate::error::{Error, ErrorKind};
+use crate::core::session::{Session, SessionRequest};
+use crate::error::{Error};
 use crate::util::LOG_ENV_NAME;
 use iced::widget;
-use librespot::oauth::OAuthToken;
-use std::rc::Rc;
-use std::sync::Arc;
+use librespot::playback::player::PlayerEvent;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 #[derive(Debug)]
 enum Message {
     AuthWizard(auth_wizard::Message),
     ProtPlay(prot_play::Message),
-    UpdateSession(Session),
+    UpdateSessionListener(
+        (
+            Session,
+            UnboundedReceiverStream<PlayerEvent>,
+            UnboundedSender<SessionRequest>,
+        ),
+    ),
+    LibrespotEventReceived(PlayerEvent),
     ChangeToView(ViewName),
-    /// Note: I am still trying to find out how to send errors over messages; Until then, use log_error method
-    ErrorLogged,
+    ErrorLogged(Error),
 }
 
 #[derive(Debug)]
@@ -38,6 +44,7 @@ pub enum ViewName {
 struct App {
     view: View,
     session: Option<Session>,
+    session_request_sender: Option<UnboundedSender<SessionRequest>>,
 }
 
 // Default implementation for iced
@@ -46,6 +53,7 @@ impl Default for App {
         Self {
             view: View::AuthWizard(auth_wizard::AuthWizard::new()),
             session: None,
+            session_request_sender: None,
         }
     }
 }
@@ -63,10 +71,11 @@ impl App {
                                 async move { Session::authenticate_with_access_token(token).await },
                                 |result| {
                                     result
-                                        .map(Message::UpdateSession)
+                                        .map(Message::UpdateSessionListener)
                                         .unwrap_or_else(Self::log_error)
                                 },
-                            ).chain(iced::Task::done(Message::ChangeToView(ViewName::ProtPlay)))
+                            )
+                            .chain(iced::Task::done(Message::ChangeToView(ViewName::ProtPlay)));
                         }
                     }
                 }
@@ -76,22 +85,37 @@ impl App {
                     match prot_play.update(sub_message) {
                         prot_play::Action::Run(task) => return task.map(Message::ProtPlay),
                         prot_play::Action::None => {}
-                        prot_play::Action::PlayThatOneSong => return self.play_that_one_song(),
-                        prot_play::Action::Pause => {}
-                        prot_play::Action::Resume => {}
                     }
                 }
             }
             Message::ChangeToView(view_name) => {
                 self.view = match view_name {
                     ViewName::AuthWizard => View::AuthWizard(auth_wizard::AuthWizard::new()),
-                    ViewName::ProtPlay => View::ProtPlay(prot_play::ProtPlay::new()),
+                    ViewName::ProtPlay => View::ProtPlay(prot_play::ProtPlay::new(
+                        self.session_request_sender.clone(),
+                    )),
                 };
             }
-            Message::UpdateSession(session) => {
+            Message::UpdateSessionListener((
+                session,
+                player_event_stream,
+                session_request_sender,
+            )) => {
+                self.session_request_sender.replace(session_request_sender);
                 self.session.replace(session);
+
+                // Start player event listener
+                return iced::Task::stream(player_event_stream)
+                    .map(Message::LibrespotEventReceived);
             }
-            Message::ErrorLogged => {}
+            Message::LibrespotEventReceived(player_event) => {
+                log::info!("{:?}", &player_event);
+                match &mut self.view {
+                    View::AuthWizard(_) => {}
+                    View::ProtPlay(prot_play) => prot_play.librespot_update(player_event),
+                }
+            }
+            Message::ErrorLogged(_) => {}
         };
 
         iced::Task::none()
@@ -113,32 +137,7 @@ impl App {
 
     fn log_error(err: Error) -> Message {
         log::error!("{:?}", err);
-        Message::ErrorLogged
-    }
-}
-
-// Implementation for music playback
-impl App {
-    fn play_that_one_song(&mut self) -> iced::Task<Message> {
-        let mut session = match self.session.take() {
-            Some(session) => session,
-            None => {
-                return iced::Task::done(Self::log_error(Error::new(
-                    ErrorKind::Unexpected,
-                    "Session should exist by now",
-                )));
-            }
-        };
-        iced::Task::perform(
-            async move {
-                session.play_that_one_song().await?;
-                Ok(session)
-            },
-            |r| {
-                r.map(Message::UpdateSession)
-                    .unwrap_or_else(Self::log_error)
-            },
-        )
+        Message::ErrorLogged(err)
     }
 }
 
