@@ -1,5 +1,5 @@
 use crate::core::config::Config;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use librespot::core::SpotifyId;
 use librespot::core::session::Session as LibrespotSession;
 use librespot::discovery::Credentials;
@@ -11,13 +11,14 @@ use librespot::playback::player::{Player, PlayerEvent, PlayerEventChannel};
 use librespot::protocol::authentication::AuthenticationType;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 pub enum SessionRequest {
     PlayThatOneTrack,
+    Play(SpotifyId),
     Pause,
     Resume,
     Stop,
@@ -27,7 +28,7 @@ pub enum SessionRequest {
 
 #[derive(Debug)]
 pub struct Session {
-    config: Option<Config>,
+    config: Config,
     session_request_handler: JoinHandle<()>,
     librespot_event_handler: JoinHandle<()>,
 }
@@ -43,15 +44,62 @@ impl Session {
         ),
         Error,
     > {
+        let oauth_credentials = Credentials::with_access_token(token.access_token);
+        Self::authenticate_with_credentials(oauth_credentials, Config::default()).await
+    }
+
+    pub async fn authenticate_with_config(
+        config: Config,
+    ) -> Result<
+        (
+            Self,
+            UnboundedReceiverStream<PlayerEvent>,
+            UnboundedSender<SessionRequest>,
+        ),
+        Error,
+    > {
+        let credentials = config.credentials.clone().ok_or(Error::auth_failed(
+            "Credentials missing in config, please log in again.",
+        ))?;
+        Self::authenticate_with_credentials(credentials, config).await
+    }
+
+    async fn authenticate_with_credentials(
+        credentials: Credentials,
+        mut config: Config,
+    ) -> Result<
+        (
+            Self,
+            UnboundedReceiverStream<PlayerEvent>,
+            UnboundedSender<SessionRequest>,
+        ),
+        Error,
+    > {
         let librespot_session_config = librespot::core::SessionConfig::default();
         let librespot_session =
             librespot::core::session::Session::new(librespot_session_config, None);
-        let oauth_credentials = Credentials::with_access_token(token.access_token);
 
-        log::info!("Logging in with oauth access token...");
-        librespot_session.connect(oauth_credentials, false).await?;
+        log::info!(
+            "Logging in with credential type {:?}...",
+            credentials.auth_type
+        );
 
-        let credentials = Self::get_stored_credentials(&librespot_session);
+        librespot_session.connect(credentials, false).await?;
+
+        let stored_credentials = Self::get_stored_credentials(&librespot_session);
+        config.set_stored_credentials(stored_credentials).await?;
+
+        Ok(Self::new(librespot_session, config))
+    }
+
+    fn new(
+        librespot_session: LibrespotSession,
+        config: Config,
+    ) -> (
+        Self,
+        UnboundedReceiverStream<PlayerEvent>,
+        UnboundedSender<SessionRequest>,
+    ) {
         let player = Self::get_new_player(librespot_session);
         let player_event_receiver = player.get_player_event_channel();
         let player_event_receiver_stream = UnboundedReceiverStream::from(player_event_receiver);
@@ -59,22 +107,25 @@ impl Session {
         let playback_data: Arc<Mutex<PlaybackData>> = Arc::new(Mutex::new(PlaybackData::default()));
         let (session_request_s, session_request_r) = mpsc::unbounded_channel::<SessionRequest>();
 
-        let librespot_event_handler =
-            tokio::spawn(Self::handle_librespot_events(player.get_player_event_channel(), playback_data.clone()));
-        let session_request_handler =
-            tokio::spawn(Self::handle_session_requests(session_request_r, player, playback_data));
+        let librespot_event_handler = tokio::spawn(Self::handle_librespot_events(
+            player.get_player_event_channel(),
+            playback_data.clone(),
+        ));
+        let session_request_handler = tokio::spawn(Self::handle_session_requests(
+            session_request_r,
+            player,
+            playback_data,
+        ));
 
-        Ok((
+        (
             Self {
-                config: Config {
-                    credentials: Some(credentials),
-                }.into(),
+                config,
                 session_request_handler,
                 librespot_event_handler,
             },
             player_event_receiver_stream,
             session_request_s,
-        ))
+        )
     }
 
     fn get_stored_credentials(session: &LibrespotSession) -> Credentials {
@@ -104,6 +155,7 @@ impl Session {
 
         while let Some(req) = rx.recv().await {
             match req {
+                SessionRequest::Play(id) => player_man.load_and_play(id).await,
                 SessionRequest::PlayThatOneTrack => player_man.play_that_one_track().await,
                 SessionRequest::Pause => player_man.pause().await,
                 SessionRequest::Resume => player_man.play().await,
@@ -124,7 +176,11 @@ impl Session {
     ) {
         while let Some(event) = rx.recv().await {
             match event {
-                PlayerEvent::Playing { play_request_id: _, position_ms, track_id: _ } => {
+                PlayerEvent::Playing {
+                    play_request_id: _,
+                    position_ms,
+                    track_id: _,
+                } => {
                     let mut playback_data = playback_data.lock().await;
                     playback_data.set_seek(position_ms as u64);
                     playback_data.set_playing();
@@ -168,6 +224,7 @@ impl PlayerMan {
     }
 
     pub async fn load_and_play(&self, track: SpotifyId) {
+        log::info!("Playing track {:?}...", track);
         self.player.load(track, true, 0);
     }
 
@@ -177,10 +234,7 @@ impl PlayerMan {
 
     async fn play_that_one_track(&self) {
         let track = SpotifyId::from_uri("spotify:track:2dQNBDqHumZS3tfzjrfUHi").unwrap();
-
         self.load_and_play(track).await;
-
-        log::info!("Playing...");
     }
 
     pub async fn pause(&self) {

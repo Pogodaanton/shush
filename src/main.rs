@@ -12,6 +12,7 @@ use iced::widget;
 use librespot::playback::player::PlayerEvent;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use crate::core::config::Config;
 
 #[derive(Debug)]
 enum Message {
@@ -67,15 +68,12 @@ impl App {
                         auth_wizard::Action::Run(task) => return task.map(Message::AuthWizard),
                         auth_wizard::Action::None => {}
                         auth_wizard::Action::AuthenticateWithToken(token) => {
-                            return iced::Task::perform(
-                                async move { Session::authenticate_with_access_token(token).await },
-                                |result| {
-                                    result
-                                        .map(Message::UpdateSessionListener)
-                                        .unwrap_or_else(Self::log_error)
-                                },
-                            )
-                            .chain(iced::Task::done(Message::ChangeToView(ViewName::ProtPlay)));
+                            return iced::Task::future(async move {
+                                Session::authenticate_with_access_token(token)
+                                    .await
+                                    .map(Message::UpdateSessionListener)
+                                    .unwrap_or_else(Self::log_error)
+                            });
                         }
                     }
                 }
@@ -105,8 +103,10 @@ impl App {
                 self.session.replace(session);
 
                 // Start player event listener
-                return iced::Task::stream(player_event_stream)
-                    .map(Message::LibrespotEventReceived);
+                return iced::Task::batch(vec![
+                    iced::Task::done(Message::ChangeToView(ViewName::ProtPlay)),
+                    iced::Task::stream(player_event_stream).map(Message::LibrespotEventReceived)
+                ]);
             }
             Message::LibrespotEventReceived(player_event) => {
                 log::info!("{:?}", &player_event);
@@ -139,6 +139,26 @@ impl App {
         log::error!("{:?}", err);
         Message::ErrorLogged(err)
     }
+
+    fn load_config() -> iced::Task<Message> {
+        iced::Task::future(async move {
+            let config_res = Config::load_from_file().await;
+
+            match config_res {
+                Ok(config) => match Session::authenticate_with_config(config).await {
+                    Ok(tuple) => return Message::UpdateSessionListener(tuple),
+                    // We need to somehow send this error to the UI eventually...
+                    // Currently, this code throws away the error message just so we can
+                    // send the ChangeToView message.
+                    Err(err) => Self::log_error(err),
+                },
+                Err(err) => Self::log_error(err),
+            };
+
+            // If all fails, you can always log in again
+            Message::ChangeToView(ViewName::AuthWizard)
+        })
+    }
 }
 
 fn main() -> Result<(), iced::Error> {
@@ -148,5 +168,7 @@ fn main() -> Result<(), iced::Error> {
         .filter_module("cosmic_text", log::LevelFilter::Info)
         .init();
 
-    iced::application("Shush", App::update, App::view).run()
+
+    iced::application("Shush", App::update, App::view)
+        .run_with(|| (App::default(), App::load_config()))
 }

@@ -17,6 +17,7 @@ pub enum ErrorKind {
     InvalidData,
     LibrespotError,
     ChannelClosed,
+    AuthenticationFailed,
 }
 
 impl Error {
@@ -52,6 +53,14 @@ impl Error {
     {
         Self::new(ErrorKind::InvalidData, message)
     }
+    
+    #[allow(dead_code)]
+    pub fn auth_failed<S>(message: S) -> Self
+    where
+        S: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::new(ErrorKind::AuthenticationFailed, message)
+    }
 }
 
 impl std::error::Error for Error {
@@ -81,6 +90,7 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::InvalidData => write!(f, "Invalid data"),
             ErrorKind::LibrespotError => write!(f, "Librespot internal error"),
             ErrorKind::ChannelClosed => write!(f, "Channel closed"),
+            ErrorKind::AuthenticationFailed => write!(f, "Authentication failed"),
         }
     }
 }

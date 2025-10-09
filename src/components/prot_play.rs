@@ -4,6 +4,7 @@ use librespot::metadata::audio::AudioItem;
 use librespot::playback::player::PlayerEvent;
 use std::ops::{RangeInclusive};
 use std::time::Instant;
+use librespot::core::SpotifyId;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
@@ -55,7 +56,6 @@ impl ProtPlay {
     }
 
     pub fn view(&self) -> iced::Element<'_, Message> {
-        log::debug!("view update!");
         iced::widget::column![
             iced::widget::progress_bar(self.seek_range.clone(), self.get_current_seek()),
             iced::widget::row![
