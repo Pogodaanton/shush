@@ -1,12 +1,13 @@
 use crate::core::session::SessionRequest;
 use crate::error::{Error, ErrorKind};
+use librespot::core::SpotifyId;
 use librespot::metadata::audio::AudioItem;
 use librespot::playback::player::PlayerEvent;
-use std::ops::{RangeInclusive};
-use std::time::Instant;
-use librespot::core::SpotifyId;
 use rspotify::AuthCodeSpotify;
-use tokio::sync::mpsc::UnboundedSender;
+use std::ops::RangeInclusive;
+use std::time::Instant;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 #[derive(Debug)]
 pub struct ProtPlay {
@@ -14,8 +15,10 @@ pub struct ProtPlay {
     play_state: PlayState,
     disable_buttons: bool,
     session_request_sender: Option<UnboundedSender<SessionRequest>>,
+    seek_ticker_handles: Option<(iced::task::Handle, iced::task::Handle)>,
     audio_item: Option<Box<AudioItem>>,
     seek_range: RangeInclusive<f32>,
+    seek_state: f32,
     last_known_seek: f32,
     last_playback_start: Option<Instant>,
 }
@@ -28,6 +31,7 @@ pub enum Message {
     Pause,
     Resume,
     Ignore,
+    SeekTick(f32),
 }
 
 #[derive(Default, Debug, Clone)]
@@ -45,14 +49,19 @@ pub enum Action {
 }
 
 impl ProtPlay {
-    pub fn new(session_request_sender: Option<UnboundedSender<SessionRequest>>, api: Option<AuthCodeSpotify>) -> Self {
+    pub fn new(
+        session_request_sender: Option<UnboundedSender<SessionRequest>>,
+        api: Option<AuthCodeSpotify>,
+    ) -> Self {
         Self {
             api,
             play_state: PlayState::default(),
             session_request_sender,
             disable_buttons: false,
+            seek_state: 0.0,
+            seek_ticker_handles: None,
             last_known_seek: 0.0,
-            seek_range: RangeInclusive::new(0.0,0.0),
+            seek_range: RangeInclusive::new(0.0, 0.0),
             audio_item: None,
             last_playback_start: None,
         }
@@ -60,10 +69,8 @@ impl ProtPlay {
 
     pub fn view(&self) -> iced::Element<'_, Message> {
         iced::widget::column![
-            iced::widget::scrollable(iced::widget::column![
-                
-            ]),
-            iced::widget::progress_bar(self.seek_range.clone(), self.get_current_seek()),
+            iced::widget::scrollable(iced::widget::column![]),
+            iced::widget::progress_bar(self.seek_range.clone(), self.seek_state),
             iced::widget::row![
                 iced::widget::button("prev").on_press(Message::Previous),
                 iced::widget::button(match self.play_state {
@@ -98,6 +105,9 @@ impl ProtPlay {
             Message::Ignore => {}
             Message::Previous => return self.previous().unwrap_or_else(Self::report_error),
             Message::Next => return self.next().unwrap_or_else(Self::report_error),
+            Message::SeekTick(seek) => {
+                self.seek_state = seek;
+            }
         }
 
         Action::None
@@ -108,14 +118,19 @@ impl ProtPlay {
             PlayerEvent::Playing { position_ms, .. } => {
                 self.disable_buttons = false;
                 self.play_state = PlayState::Playing;
-                self.last_known_seek = position_ms as f32;
+                self.last_known_seek = position_ms.clone() as f32;
                 self.last_playback_start.replace(Instant::now());
+
+                return self.reset_seek_ticker(position_ms as f32);
             }
             PlayerEvent::Paused { position_ms, .. } => {
                 self.disable_buttons = false;
                 self.play_state = PlayState::Paused;
-                self.last_known_seek = position_ms as f32;
+                self.last_known_seek = position_ms.clone() as f32;
                 self.last_playback_start = None;
+
+                self.stop_seek_ticker();
+                self.seek_state = position_ms as f32;
             }
             PlayerEvent::Stopped { .. } => {
                 self.disable_buttons = false;
@@ -123,6 +138,9 @@ impl ProtPlay {
                 self.last_known_seek = 0.0;
                 self.last_playback_start = None;
                 self.seek_range = RangeInclusive::new(0.0, 0.0);
+
+                self.stop_seek_ticker();
+                self.seek_state = 0.0;
             }
             PlayerEvent::EndOfTrack { .. } => {
                 self.disable_buttons = false;
@@ -131,6 +149,9 @@ impl ProtPlay {
                 self.last_playback_start = None;
                 self.seek_range = RangeInclusive::new(0.0, 0.0);
                 self.audio_item = None;
+
+                self.stop_seek_ticker();
+                self.seek_state = 0.0;
             }
             PlayerEvent::Seeked { position_ms, .. } => {
                 self.disable_buttons = false;
@@ -138,7 +159,10 @@ impl ProtPlay {
 
                 if let PlayState::Playing = self.play_state {
                     self.last_playback_start.replace(Instant::now());
+                    return self.reset_seek_ticker(position_ms as f32);
                 }
+
+                self.seek_state = position_ms as f32;
             }
             PlayerEvent::TrackChanged { audio_item } => {
                 self.seek_range = RangeInclusive::new(0.0, audio_item.duration_ms as f32);
@@ -146,7 +170,7 @@ impl ProtPlay {
             }
             _ => {}
         }
-        
+
         Action::None
     }
 
@@ -158,10 +182,9 @@ impl ProtPlay {
     }
 
     fn api(&self) -> Result<&AuthCodeSpotify, Error> {
-        self.api.as_ref().ok_or(Error::new(
-            ErrorKind::Unexpected,
-            "Cannot access api!",
-        ))
+        self.api
+            .as_ref()
+            .ok_or(Error::new(ErrorKind::Unexpected, "Cannot access api!"))
     }
 
     fn play_that_one_song(&mut self) -> Result<Action, Error> {
@@ -212,6 +235,45 @@ impl ProtPlay {
         log::info!("Requesting next song.");
 
         Ok(Action::None)
+    }
+
+    /// Brute-forced solution to make the progress bar update dynamically.
+    /// I don't know whether this is the desired way to do it... Looks very convoluted and also performance-nagging.
+    fn reset_seek_ticker(&mut self, latest_seek_state: f32) -> Action {
+        self.stop_seek_ticker();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+        let (receiver_task, receiver_handle) =
+            iced::Task::stream(UnboundedReceiverStream::from(rx)).abortable();
+        let (sender_task, sender_handle) = iced::Task::future(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+            let mut seek = latest_seek_state;
+
+            interval.tick().await;
+            loop {
+                if tx.is_closed() {
+                    return Message::Ignore;
+                }
+
+                interval.tick().await;
+
+                seek = seek + 100.0;
+                tx.send(Message::SeekTick(seek)).unwrap();
+            }
+        })
+        .abortable();
+
+        self.seek_ticker_handles
+            .replace((receiver_handle, sender_handle));
+
+        Action::Run(iced::Task::batch(vec![receiver_task, sender_task]))
+    }
+
+    fn stop_seek_ticker(&mut self) {
+        if let Some((handle_1, handle_2)) = self.seek_ticker_handles.take() {
+            handle_1.abort();
+            handle_2.abort();
+        }
     }
 
     fn get_current_seek(&self) -> f32 {
