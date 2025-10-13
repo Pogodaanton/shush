@@ -91,6 +91,7 @@ impl App {
                     ViewName::AuthWizard => View::AuthWizard(auth_wizard::AuthWizard::new()),
                     ViewName::ProtPlay => View::ProtPlay(prot_play::ProtPlay::new(
                         self.session_request_sender.clone(),
+                        self.session.as_ref().map(|s| s.rspotify())
                     )),
                 };
             }
@@ -112,7 +113,10 @@ impl App {
                 log::info!("{:?}", &player_event);
                 match &mut self.view {
                     View::AuthWizard(_) => {}
-                    View::ProtPlay(prot_play) => prot_play.librespot_update(player_event),
+                    View::ProtPlay(prot_play) => match prot_play.librespot_update(player_event) {
+                        prot_play::Action::Run(task) => return task.map(Message::ProtPlay),
+                        _ => {}
+                    },
                 }
             }
             Message::ErrorLogged(_) => {}

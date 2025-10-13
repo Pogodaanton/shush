@@ -5,10 +5,12 @@ use librespot::playback::player::PlayerEvent;
 use std::ops::{RangeInclusive};
 use std::time::Instant;
 use librespot::core::SpotifyId;
+use rspotify::AuthCodeSpotify;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub struct ProtPlay {
+    api: Option<AuthCodeSpotify>,
     play_state: PlayState,
     disable_buttons: bool,
     session_request_sender: Option<UnboundedSender<SessionRequest>>,
@@ -43,8 +45,9 @@ pub enum Action {
 }
 
 impl ProtPlay {
-    pub fn new(session_request_sender: Option<UnboundedSender<SessionRequest>>) -> Self {
+    pub fn new(session_request_sender: Option<UnboundedSender<SessionRequest>>, api: Option<AuthCodeSpotify>) -> Self {
         Self {
+            api,
             play_state: PlayState::default(),
             session_request_sender,
             disable_buttons: false,
@@ -57,6 +60,9 @@ impl ProtPlay {
 
     pub fn view(&self) -> iced::Element<'_, Message> {
         iced::widget::column![
+            iced::widget::scrollable(iced::widget::column![
+                
+            ]),
             iced::widget::progress_bar(self.seek_range.clone(), self.get_current_seek()),
             iced::widget::row![
                 iced::widget::button("prev").on_press(Message::Previous),
@@ -97,7 +103,7 @@ impl ProtPlay {
         Action::None
     }
 
-    pub fn librespot_update(&mut self, player_event: PlayerEvent) {
+    pub fn librespot_update(&mut self, player_event: PlayerEvent) -> Action {
         match player_event {
             PlayerEvent::Playing { position_ms, .. } => {
                 self.disable_buttons = false;
@@ -140,12 +146,21 @@ impl ProtPlay {
             }
             _ => {}
         }
+        
+        Action::None
     }
 
     fn session_sender(&self) -> Result<&UnboundedSender<SessionRequest>, Error> {
         self.session_request_sender.as_ref().ok_or(Error::new(
             ErrorKind::Unexpected,
             "Cannot access session_request_sender!",
+        ))
+    }
+
+    fn api(&self) -> Result<&AuthCodeSpotify, Error> {
+        self.api.as_ref().ok_or(Error::new(
+            ErrorKind::Unexpected,
+            "Cannot access api!",
         ))
     }
 

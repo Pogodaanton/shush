@@ -1,7 +1,7 @@
+use crate::compat::LibrespotSession;
 use crate::core::config::Config;
 use crate::error::{Error, ErrorKind};
 use librespot::core::SpotifyId;
-use librespot::core::session::Session as LibrespotSession;
 use librespot::discovery::Credentials;
 use librespot::oauth::OAuthToken;
 use librespot::playback::audio_backend;
@@ -9,6 +9,7 @@ use librespot::playback::config::{AudioFormat, PlayerConfig};
 use librespot::playback::mixer::NoOpVolume;
 use librespot::playback::player::{Player, PlayerEvent, PlayerEventChannel};
 use librespot::protocol::authentication::AuthenticationType;
+use rspotify::AuthCodeSpotify;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -29,6 +30,8 @@ pub enum SessionRequest {
 #[derive(Debug)]
 pub struct Session {
     config: Config,
+    librespot_session: LibrespotSession,
+    rspotify: AuthCodeSpotify,
     session_request_handler: JoinHandle<()>,
     librespot_event_handler: JoinHandle<()>,
 }
@@ -76,31 +79,33 @@ impl Session {
         Error,
     > {
         let librespot_session_config = librespot::core::SessionConfig::default();
-        let librespot_session =
-            librespot::core::session::Session::new(librespot_session_config, None);
+        let librespot_session = LibrespotSession::new(librespot_session_config, None);
 
         log::info!(
             "Logging in with credential type {:?}...",
             credentials.auth_type
         );
 
-        librespot_session.connect(credentials, false).await?;
+        librespot_session.get_ref().connect(credentials, false).await?;
 
-        let stored_credentials = Self::get_stored_credentials(&librespot_session);
+        let stored_credentials = librespot_session.get_stored_credentials();
         config.set_stored_credentials(stored_credentials).await?;
 
-        Ok(Self::new(librespot_session, config))
+        let rspotify = Self::get_new_rspotify(&librespot_session).await?;
+
+        Ok(Self::new(librespot_session, rspotify, config))
     }
 
     fn new(
         librespot_session: LibrespotSession,
+        rspotify: AuthCodeSpotify,
         config: Config,
     ) -> (
         Self,
         UnboundedReceiverStream<PlayerEvent>,
         UnboundedSender<SessionRequest>,
     ) {
-        let player = Self::get_new_player(librespot_session);
+        let player = Self::get_new_player(librespot_session.clone());
         let player_event_receiver = player.get_player_event_channel();
         let player_event_receiver_stream = UnboundedReceiverStream::from(player_event_receiver);
 
@@ -120,6 +125,8 @@ impl Session {
         (
             Self {
                 config,
+                librespot_session,
+                rspotify,
                 session_request_handler,
                 librespot_event_handler,
             },
@@ -128,22 +135,25 @@ impl Session {
         )
     }
 
-    fn get_stored_credentials(session: &LibrespotSession) -> Credentials {
-        Credentials {
-            username: session.username().into(),
-            auth_type: AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS,
-            auth_data: session.auth_data(),
-        }
-    }
-
     pub fn get_new_player(session: LibrespotSession) -> Arc<Player> {
         let player_config = PlayerConfig::default();
         let audio_format = AudioFormat::default();
         let backend = audio_backend::find(None).unwrap();
 
-        Player::new(player_config, session, Box::new(NoOpVolume), move || {
+        Player::new(player_config, session.get_inner(), Box::new(NoOpVolume), move || {
             backend(None, audio_format)
         })
+    }
+
+    pub async fn get_new_rspotify(session: &LibrespotSession) -> Result<AuthCodeSpotify, Error> {
+        let login5_token = session.get_ref().login5().auth_token().await?;
+        Ok(AuthCodeSpotify::from_token(rspotify::Token {
+            access_token: login5_token.access_token,
+            refresh_token: None,
+            expires_in: chrono::TimeDelta::seconds(login5_token.expires_in.as_secs() as i64),
+            expires_at: None,
+            scopes: login5_token.scopes.into_iter().collect(),
+        }))
     }
 
     async fn handle_session_requests(
@@ -207,6 +217,10 @@ impl Session {
                 _ => {}
             }
         }
+    }
+
+    pub fn rspotify(&self) -> AuthCodeSpotify {
+        self.rspotify.clone()
     }
 }
 
