@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build_iced:
     strategy:
       matrix:
         include:
@@ -22,6 +22,8 @@ jobs:
 
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: 'v0-rust-iced'
 
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
@@ -31,5 +33,32 @@ jobs:
         uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
-          name: shush.exe
+          name: shush_iced.exe
+          path: target/release/shush.exe
+
+  build_gpui:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: 'v0-rust-gpui'
+
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --features gpui
+
+      - name: Upload Windows Executable
+        uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: shush_gpui.exe
           path: target/release/shush.exe
