@@ -1,3 +1,4 @@
+use std::ops::Add;
 use crate::compat::LibrespotSession;
 use crate::core::config::Config;
 use crate::error::{Error, ErrorKind};
@@ -147,13 +148,18 @@ impl Session {
 
     pub async fn get_new_rspotify(session: &LibrespotSession) -> Result<AuthCodeSpotify, Error> {
         let login5_token = session.get_ref().login5().auth_token().await?;
-        Ok(AuthCodeSpotify::from_token(rspotify::Token {
+        let expires_in = chrono::TimeDelta::from_std(login5_token.expires_in).unwrap_or_default();
+        let expired_at = chrono::Utc::now().add(expires_in);
+        let rspotify_token = rspotify::Token {
             access_token: login5_token.access_token,
             refresh_token: None,
-            expires_in: chrono::TimeDelta::seconds(login5_token.expires_in.as_secs() as i64),
-            expires_at: None,
+            expires_in,
+            // While this is technically untrue because we created the token a bit earlier, it's good enough for now.
+            expires_at: Some(expired_at),
             scopes: login5_token.scopes.into_iter().collect(),
-        }))
+        };
+
+        Ok(AuthCodeSpotify::from_token(rspotify_token))
     }
 
     async fn handle_session_requests(

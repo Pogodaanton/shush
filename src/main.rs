@@ -94,6 +94,15 @@ impl App {
                         self.session.as_ref().map(|s| s.rspotify())
                     )),
                 };
+
+                // This is a lot of duplicate code and I hate it
+                match &self.view {
+                    View::ProtPlay(prot_play) => match prot_play.on_mount() {
+                        prot_play::Action::Run(task) => return task.map(Message::ProtPlay),
+                        prot_play::Action::None => {}
+                    },
+                    _ => {}
+                }
             }
             Message::UpdateSessionListener((
                 session,
@@ -111,6 +120,8 @@ impl App {
             }
             Message::LibrespotEventReceived(player_event) => {
                 log::info!("{:?}", &player_event);
+                
+                // This is a lot of duplicate code and I hate it
                 match &mut self.view {
                     View::AuthWizard(_) => {}
                     View::ProtPlay(prot_play) => match prot_play.librespot_update(player_event) {

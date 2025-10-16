@@ -1,11 +1,17 @@
 use crate::core::session::SessionRequest;
 use crate::error::{Error, ErrorKind};
+use iced::futures::StreamExt;
+use iced::widget::text;
 use librespot::core::SpotifyId;
 use librespot::metadata::audio::AudioItem;
 use librespot::playback::player::PlayerEvent;
 use rspotify::AuthCodeSpotify;
+use rspotify::clients::OAuthClient;
+use rspotify::model::{FullTrack, Id, SavedTrack};
 use std::ops::RangeInclusive;
 use std::time::Instant;
+use iced::Theme;
+use iced::widget::button::Status;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -21,6 +27,7 @@ pub struct ProtPlay {
     seek_state: f32,
     last_known_seek: f32,
     last_playback_start: Option<Instant>,
+    my_tracks: Option<Vec<SavedTrack>>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +39,8 @@ pub enum Message {
     Resume,
     Ignore,
     SeekTick(f32),
+    MyTracksListLoaded(Vec<SavedTrack>),
+    ChooseTrack(FullTrack),
 }
 
 #[derive(Default, Debug, Clone)]
@@ -64,12 +73,33 @@ impl ProtPlay {
             seek_range: RangeInclusive::new(0.0, 0.0),
             audio_item: None,
             last_playback_start: None,
+            my_tracks: None,
         }
     }
 
+    pub fn on_mount(&self) -> Action {
+        // TODO: error handling
+        Action::Run(iced::Task::future(Self::load_my_songs_list(
+            self.api().unwrap().clone(),
+        )))
+    }
+
     pub fn view(&self) -> iced::Element<'_, Message> {
+        let el: iced::Element<_> = match &self.my_tracks {
+            None => text!("Empty List").into(),
+            Some(vec) => iced::widget::scrollable(iced::widget::column(
+                vec.into_iter()
+                    .map(|track| {
+                        iced::widget::button(iced::widget::text(track.track.name.clone()))
+                            .on_press(Message::ChooseTrack(track.track.clone()))
+                            .style(iced::widget::button::text)
+                            .into()
+                    }),
+            )).height(iced::Length::Fill).width(iced::Length::Fill).into(),
+        };
+
         iced::widget::column![
-            iced::widget::scrollable(iced::widget::column![]),
+            el,
             iced::widget::progress_bar(self.seek_range.clone(), self.seek_state),
             iced::widget::row![
                 iced::widget::button("prev").on_press(Message::Previous),
@@ -108,6 +138,10 @@ impl ProtPlay {
             Message::SeekTick(seek) => {
                 self.seek_state = seek;
             }
+            Message::MyTracksListLoaded(vec) => {
+                self.my_tracks.replace(vec);
+            },
+            Message::ChooseTrack(track) => return self.play(track).unwrap_or_else(Self::report_error),
         }
 
         Action::None
@@ -197,6 +231,20 @@ impl ProtPlay {
         Ok(Action::None)
     }
 
+    fn play(&mut self, track: FullTrack) -> Result<Action, Error> {
+        self.disable_buttons = true;
+        let sender = self.session_sender()?;
+        let spotify_uri = track.id
+            .ok_or_else(|| Error::invalid_data(format!("Track \"{:?}\" does not have an ID. Is it a local file?", track.name)))?
+            .uri();
+        let spotify_id = SpotifyId::from_uri(&spotify_uri)?;
+        sender.send(SessionRequest::Play(spotify_id));
+
+        log::info!("Playing the song \"{:?}\"...", track.name);
+
+        Ok(Action::None)
+    }
+
     fn pause(&mut self) -> Result<Action, Error> {
         self.disable_buttons = true;
         let sender = self.session_sender()?;
@@ -274,6 +322,17 @@ impl ProtPlay {
             handle_1.abort();
             handle_2.abort();
         }
+    }
+
+    async fn load_my_songs_list(api: AuthCodeSpotify) -> Message {
+        let saved_tracks = api
+            .current_user_saved_tracks(None)
+            .filter_map(|res| async { res.ok() })
+            .collect::<Vec<_>>()
+            .await;
+
+        log::info!("Successfully loaded my tracks list.");
+        Message::MyTracksListLoaded(saved_tracks)
     }
 
     fn get_current_seek(&self) -> f32 {
