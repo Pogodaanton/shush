@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - main
-      - explore/iced
+      - explore/iced_gui
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,7 +25,7 @@ jobs:
 
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --release
+        run: cargo build --release --features iced
 
       - name: Upload Windows Executable
         uses: actions/upload-artifact@v4
