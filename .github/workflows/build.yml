@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - main
-      - explore/iced_gui
+      - explore/iced
 
 env:
   CARGO_TERM_COLOR: always
